@@ -1,34 +1,46 @@
 """
 Bước 3: RAG Chain - Tích hợp LLM + Retriever + Prompts
+Sử dụng Ollama với streaming + timing + improved prompt
 """
 
 import os
 import time
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
+from typing import Optional, Callable
+from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_core.runnables import RunnablePassthrough
 
-from system_prompt import SYSTEM_PROMPT, PROMPT_TEMPLATE, REFUSAL_RESPONSE
+from system_prompt import REFUSAL_RESPONSE
 from refusal_and_citations import REFUSAL_MESSAGES
 
-# Load API key
-load_dotenv(override=True)
+# Ollama configuration
+OLLAMA_MODEL = "llama3"
+OLLAMA_BASE_URL = "http://localhost:11434"
 
-# Confidence threshold for relevance
-RELEVANCE_THRESHOLD = 0.5  # Similarity score must be > 0.5 to answer
+# Improved prompt - KHÔNG tóm tắt, trích dẫn đầy đủ
+VIETNAMESE_PROMPT = """Bạn là trợ lý luật pháp Việt Nam chuyên nghiệp.
 
+QUY TẮC BẮT BUỘC (PHẢI TUÂN THỦ 100%):
+1. TRẢ LỜI HOÀN TOÀN BẰNG TIẾNG VIỆT
+2. KHÔNG ĐƯỢC TÓM TẮT - trích xuất ĐẦY ĐỦ nội dung từ tài liệu
+3. KHÔNG ĐƯỢC THÊM thông tin không có trong tài liệu
+4. Nếu tài liệu có nhiều mục (1., 2., 3., ...) → LIỆT KÊ ĐẦY ĐỦ TẤT CẢ
+5. Nếu hỏi về "các hành vi bị cấm" → ĐẾM số mục trong tài liệu → LIỆT KÊ ĐỦ
+6. Nếu thông tin KHÔNG CÓ trong context → TỪ CHỐI ngay
 
-def get_api_key():
-    """Get API key from environment, reload from .env if needed"""
-    # Reload .env to pick up any changes
-    load_dotenv(override=True)
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key or api_key.startswith("GOOGLE_API_KEY="):
-        raise ValueError("API key not found or invalid in .env file")
-    return api_key
+ĐỊNH DẠNG TRẢ LỜI:
+- Trích xuất ĐẦY ĐỦ nội dung liên quan
+- Giữ nguyên số thứ tự như trong tài liệu gốc
+- Ghi rõ nguồn: [Điều X, Luật Y]
+
+TÀI LIỆU:
+{context}
+
+CÂU HỎI: {query}
+
+TRẢ LỜI (TRÍCH XUẤT ĐẦY ĐỦ, KHÔNG TÓM TẮT):
+"""
 
 
 def load_faiss_vectorstore():
@@ -55,7 +67,7 @@ def build_rag_chain(temperature=0.1, top_k=5, rebuild_llm=False):
     Args:
         temperature: LLM temperature (0.0-1.0), lower = more factual
         top_k: Number of documents to retrieve in search_kwargs
-        rebuild_llm: Force rebuild LLM with fresh API key
+        rebuild_llm: Force rebuild LLM
     """
     print("🔧 Building RAG chain...")
     
@@ -63,17 +75,13 @@ def build_rag_chain(temperature=0.1, top_k=5, rebuild_llm=False):
     vectorstore = load_faiss_vectorstore()
     retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
     
-    # 2. Init LLM with fresh API key
-    api_key = get_api_key()
-    print(f"[Using API Key: {api_key[:15]}...]")
+    # 2. Init LLM với Ollama
+    print(f"[Using Ollama model: {OLLAMA_MODEL}]")
     
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=api_key,
-        temperature=temperature,  # Configurable: Low = more factual
-        top_p=0.95,
-        top_k=40,
-        request_timeout=60  # 60 second timeout
+    llm = OllamaLLM(
+        model=OLLAMA_MODEL,
+        base_url=OLLAMA_BASE_URL,
+        temperature=temperature,
     )
     
     # 3. Build custom chain
@@ -109,90 +117,125 @@ def build_rag_chain(temperature=0.1, top_k=5, rebuild_llm=False):
             """Alias for __call__"""
             return self(inputs)
     
-    qa_chain = CustomRAGChain(llm, retriever, vectorstore, PROMPT_TEMPLATE)
+    qa_chain = CustomRAGChain(llm, retriever, vectorstore, VIETNAMESE_PROMPT)
     
     print("✅ RAG chain built successfully")
     return qa_chain
 
 
-def query_rag(qa_chain, question: str, max_retries=3) -> dict:
+def query_rag(qa_chain, question: str, max_retries=3, stream_callback: Optional[Callable] = None) -> dict:
     """
-    Query RAG chain with CONFIDENCE CHECKING to prevent hallucination
-    
-    Args:
-        qa_chain: RAG chain instance (must have retriever accessible)
-        question: User question
-        max_retries: Max retry attempts if API fails
-    
-    Returns:
-        dict: {
-            "answer": str,
-            "sources": list[Document],
-            "source_citations": list[str],
-            "refused": bool
-        }
-    
-    Raises:
-        Exception: If all retries fail
+    Query RAG chain với streaming và timing
     """
+    total_start = time.time()
     
-    # STEP 0: Pre-check for obviously out-of-domain questions
+    # ============ CƠ CHẾ TỪ CHỐI - STEP 0 ============
     question_lower = question.lower()
     
-    # Keywords that indicate question is definitely NOT about laws
+    # Từ khóa out-of-domain - từ chối ngay
     out_of_domain_keywords = [
         "who are you", "ai la ai", "ban la ai", "maye la ai", "mai la ai", 
         "ban ten la gi", "ban la gì", "ai la ban", "tim ban",
         "what is your name", "who built you", "tu tien huy",
-        "reckon", "recipe", "nau an", "nan", "anh la ai", "chi la ai",
-        "me la ai", "cha la ai", "con la gì",  
+        "recipe", "nau an", "lam an", "cong thuc nau an",
         "love", "dating", "em la ai", "yeu", "hen ho",
         "joke", "tro chuyen", "tao la ai", "co la ai",
-        "xau", "xin", "van phong", "cong ty", "di lam"
     ]
     
-    # Check if question contains any out-of-domain keywords
     if any(keyword in question_lower for keyword in out_of_domain_keywords):
         return {
             "answer": REFUSAL_MESSAGES["out_of_scope"],
             "sources": [],
             "source_citations": [],
-            "refused": True
+            "refused": True,
+            "timing": {"search_time": 0, "llm_time": 0, "total_time": time.time() - total_start}
         }
     
     last_error = None
     
     for attempt in range(max_retries):
         try:
-            # STEP 1: Query RAG chain
-            result = qa_chain({"query": question})
-            answer = result.get("result", "").strip()
+            # STEP 1: Tìm kiếm tài liệu
+            search_start = time.time()
+            print("🔍 Đang tìm kiếm tài liệu...")
             
-            # Basic validation - answer should not be empty
-            if not answer or len(answer) < 5:
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-                else:
-                    return {
-                        "answer": "Không có câu trả lời phù hợp được tìm thấy.",
-                        "sources": [],
-                        "source_citations": [],
-                        "refused": True
-                    }
+            docs = qa_chain.retriever.invoke(question)
+            search_time = time.time() - search_start
+            print(f"✅ Tìm thấy {len(docs)} tài liệu trong {search_time:.2f}s")
             
-            # Extract citations from source documents
+            # Kiểm tra nếu không tìm thấy tài liệu
+            if len(docs) == 0:
+                return {
+                    "answer": "Không tìm thấy tài liệu liên quan.",
+                    "sources": [],
+                    "source_citations": [],
+                    "refused": True,
+                    "timing": {"search_time": search_time, "llm_time": 0, "total_time": time.time() - total_start}
+                }
+            
+            # STEP 2: Tạo prompt
+            context = "\n\n".join([doc.page_content for doc in docs])
+            full_prompt = qa_chain.template.format(context=context, query=question)
+            
+            # STEP 3: Generate với streaming
+            llm_start = time.time()
+            print("🤖 Đang tạo câu trả lời...")
+            
+            answer_chunks = []
+            if stream_callback:
+                for chunk in qa_chain.llm.stream(full_prompt):
+                    chunk_text = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                    answer_chunks.append(chunk_text)
+                    stream_callback(chunk_text)
+            else:
+                result = qa_chain.llm.invoke(full_prompt)
+                answer_chunks = [result.content if hasattr(result, 'content') else str(result)]
+            
+            answer = "".join(answer_chunks).strip()
+            llm_time = time.time() - llm_start
+            print(f"✅ Tạo xong trong {llm_time:.2f}s")
+            
+            # ============ CƠ CHẾ TỪ CHỐI - STEP 4 ============
+            # Kiểm traHallucination - nếu trả lời có dấu hiệu bịa đặt
+            answer_lower = answer.lower()
+            hallucination_indicators = [
+                "không có trong tài liệu",
+                "không được đề cập",
+                "không tìm thấy",
+                "thông tin không có",
+                "tôi nghĩ", "tôi hiểu",
+            ]
+            
+            # Nếu câu trả lời quá ngắn hoặc có dấu hiệu từ chối
+            if not answer or len(answer) < 10:
+                return {
+                    "answer": "Không tìm thấy thông tin phù hợp trong tài liệu.",
+                    "sources": docs,
+                    "source_citations": [d.metadata.get("citation", "") for d in docs],
+                    "refused": True,
+                    "timing": {"search_time": search_time, "llm_time": llm_time, "total_time": time.time() - total_start}
+                }
+            
+            # Trích xuất citations từ metadata
             citations = []
-            for doc in result.get("source_documents", []):
+            for doc in docs:
                 citation = doc.metadata.get("citation", "")
                 if citation and citation not in citations:
                     citations.append(citation)
             
+            total_time = time.time() - total_start
+            print(f"⏱️ Tổng thời gian: {total_time:.2f}s")
+            
             return {
                 "answer": answer,
-                "sources": result.get("source_documents", []),
+                "sources": docs,
                 "source_citations": citations,
-                "refused": False
+                "refused": False,
+                "timing": {
+                    "search_time": search_time,
+                    "llm_time": llm_time,
+                    "total_time": total_time
+                }
             }
             
         except Exception as e:
@@ -205,8 +248,13 @@ def query_rag(qa_chain, question: str, max_retries=3) -> dict:
                 print(f"[Failed after {max_retries} attempts]")
                 break
     
-    # If we get here, all retries failed
-    raise Exception(f"[Query failed after {max_retries} attempts]: {str(last_error)}")
+    return {
+        "answer": f"Lỗi: {str(last_error)}",
+        "sources": [],
+        "source_citations": [],
+        "refused": True,
+        "timing": {"search_time": 0, "llm_time": 0, "total_time": time.time() - total_start}
+    }
 
 
 def format_output(result: dict) -> str:

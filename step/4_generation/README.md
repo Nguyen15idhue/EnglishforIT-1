@@ -2,7 +2,7 @@
 
 ## 📋 Overview
 
-Giai đoạn này tích hợp **Large Language Model (Gemini Pro)** với hệ thống retrieval từ giai đoạn 3 để:
+Giai đoạn này tích hợp **Ollama (Mistral 7B)** - chạy local, miễn phí, không giới hạn - với hệ thống retrieval từ giai đoạn 3 để:
 - ✅ Generate câu trả lời tự nhiên từ retrieved documents
 - ✅ Implement "refusal mechanism" - từ chối trả lời khi không đủ thông tin
 - ✅ Extract và validate citations từ metadata
@@ -10,20 +10,38 @@ Giai đoạn này tích hợp **Large Language Model (Gemini Pro)** với hệ t
 
 ## 🛠️ Setup
 
-### 1. Environment
-```bash
-# API key trong .env
-export GOOGLE_API_KEY="your-key-here"
+### 1. Cài đặt Ollama
 
-# Hoặc tạo file .env
-echo 'GOOGLE_API_KEY="..."' > .env
+**Windows:**
+```bash
+# Download từ https://ollama.com
+# Chạy installer và khởi động Ollama
+```
+
+**Sau khi cài, tải model Mistral:**
+```bash
+ollama pull mistral
+```
+
+Kiểm tra hoạt động:
+```bash
+ollama run mistral "Hello"
 ```
 
 ### 2. Dependencies
 ```bash
-# Đã install:
-pip install google-generativeai langchain-google-genai
-pip install python-dotenv
+pip install -r requirements.txt
+# Đảm bảo có: langchain-ollama>=0.1.0
+```
+
+### 3. Chạy ứng dụng
+```bash
+# Desktop app
+python step/5_demo/desktop_app.py
+
+# Hoặc test RAG chain
+cd step/4_generation
+python rag_chain.py
 ```
 
 ## 📁 File Structure
@@ -121,15 +139,19 @@ for q in queries:
 
 ## ⚙️ Configuration
 
-### Model Parameters
+### Model Parameters (Ollama)
 ```python
 # In rag_chain.py
-llm = ChatGoogleGenerativeAI(
-    model="gemini-pro",
-    google_api_key=api_key,
+OLLAMA_MODEL = "mistral"  # Model: mistral:7b
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+llm = Ollama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
     temperature=0.1,     # Low = more factual, no creativity
     top_p=0.95,         # Nucleus sampling
-    top_k=40            # Top K sampling
+    top_k=40,           # Top K sampling
+    timeout=120         # Timeout 120s
 )
 ```
 
@@ -154,59 +176,53 @@ KHÔNG sử dụng kiến thức bên ngoài.
 
 ## 📊 Expected Performance
 
-### Metrics
-- **Response time**: 2-5 seconds
-- **Confidence score**: 80-95% cho câu hỏi trong scope
+### Metrics (Ollama - Local)
+- **Response time**: 3-10 seconds (tùy CPU)
+- **Miễn phí**: Không giới hạn request
 - **Citation accuracy**: 100% (từ metadata, không LLM extract)
 - **Hallucination rate**: 0% (validation check)
 
-### Test Results (5/5 tests)
-| Test | Category | Confidence | Time | Valid |
-|------|----------|-----------|------|-------|
-| 1 | Operational | 95% | 2.3s | ✅ |
-| 2 | Responsibility | 90% | 2.1s | ✅ |
-| 3 | Overview | 88% | 2.4s | ✅ |
-| 4 | Penalty | 85% | 2.5s | ✅ |
-| 5 | Out-of-scope | - | 1.2s | ✅ (Refusal) |
+### Performance depends on:
+- **CPU**: Model chạy trên CPU (RTX 2050 hỗ trợ nhưng không required)
+- **RAM**: Cần ~8GB RAM available
+- **Disk**: Model mistral ~4GB
 
 ## 🔍 Debugging
 
-### Issue 1: API Quota Exceeded
+### Issue 1: Ollama not running
 ```
-Error: 429 RESOURCE_EXHAUSTED
+Error: Connection refused to http://localhost:11434
 ```
 **Solution:**
-- Free tier Gemini có giới hạn hàng ngày
-- Chờ quota reset (24h)
-- Hoặc upgrade lên paid tier
+- Đảm bảo Ollama đang chạy: `ollama serve`
+- Hoặc khởi động lại Ollama app
 
-### Issue 2: Model Not Found
+### Issue 2: Model not found
 ```
-Error: 404 NOT_FOUND. models/gemini-pro is not found
+Error: model 'mistral' not found
 ```
 **Solution:**
-- Check xem model name có typo không
-- Đảm bảo API key có quyền access model
+```bash
+ollama pull mistral
+```
 
-### Issue 3: Low Confidence Answers
+### Issue 3: Out of memory
 ```
-confidence: 35% (low!)
+Error: CUDA out of memory / OOM
 ```
 **Solution:**
-- Adjust MIN_CONFIDENCE threshold
-- Tune LLM temperature (thấp hơn = factual hơn)
-- Review prompt template
+- Ollama sẽ tự động dùng CPU nếu GPU không đủ VRAM
+- Đảm bảo còn ~8GB RAM free
 
 ## ✅ Checklist - Khi nào coi là hoàn thành?
 
-- [ ] `test_gemini_connection.py` chạy thành công
-- [ ] `test_rag.py` - 5/5 tests passed
-- [ ] Average response time < 5s
-- [ ] Confidence score > 80%
+- [ ] Ollama đã cài đặt và chạy
+- [ ] Model mistral đã tải: `ollama list`
+- [ ] `python rag_chain.py` chạy thành công
+- [ ] Desktop app hoạt động tốt
+- [ ] Response time chấp nhận được
 - [ ] Zero hallucinations detected
 - [ ] Citations 100% accurate
-- [ ] README đầy đủ
-- [ ] Code documented
 
 ## 📝 Notes
 
@@ -254,12 +270,12 @@ logging.info(f"{timestamp}, {question}, {answer}, {confidence}")
 
 ## 📚 References
 
-- [Gemini API Docs](https://ai.google.dev/)
-- [LangChain RetrievalQA](https://python.langchain.com/docs/use_cases/question_answering/)
-- [RAG Best Practices](https://github.com/langchain-ai/langchain/discussions)
+- [Ollama Documentation](https://ollama.com/)
+- [LangChain Ollama](https://python.langchain.com/docs/integrations/llms/ollama/)
+- [Mistral Model](https://mistral.ai/)
 
 ---
 
-**Status**: ✅ Phase 4 Complete  
-**Last Updated**: Feb 6, 2026  
-**Next**: Giai đoạn 5 - Demo UI (Streamlit)
+**Status**: ✅ Phase 4 Complete (Ollama)  
+**Last Updated**: Feb 28, 2026  
+**LLM**: Ollama (mistral:7b) - Local, Free, No limits

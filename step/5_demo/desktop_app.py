@@ -30,6 +30,7 @@ class LegalAssistantApp:
         self.qa_chain = None
         self.query_history = []
         self.is_loading = False
+        self.current_answer_chunks = []
         
         # Colors
         self.bg_color = "#1e1e1e"
@@ -63,7 +64,7 @@ class LegalAssistantApp:
         
         subtitle = tk.Label(
             header_frame,
-            text="Hệ thống Q&A thông minh về văn bản luật - RAG + Gemini AI",
+            text="Hệ thống Q&A thông minh về văn bản luật - RAG + LLAMA3 (Mistral 7B) - Tiếng Việt",
             font=("Segoe UI", 10),
             bg=self.bg_color,
             fg="#999"
@@ -228,11 +229,11 @@ class LegalAssistantApp:
         )
         topk_label.pack(anchor=tk.W, pady=(0, 5))
         
-        self.topk_var = tk.IntVar(value=5)
+        self.topk_var = tk.IntVar(value=10)  # Tăng lên 10 để lấy đủ tài liệu
         self.topk_slider = tk.Scale(
             settings_frame,
             from_=1,
-            to=10,
+            to=15,
             orient=tk.HORIZONTAL,
             variable=self.topk_var,
             bg=self.button_color,
@@ -243,7 +244,7 @@ class LegalAssistantApp:
         
         topk_hint = tk.Label(
             settings_frame,
-            text="1 = Ít  |  10 = Nhiều",
+            text="1 = Ít  |  15 = Nhiều (Dùng 10-15 để lấy đủ thông tin)",
             font=("Segoe UI", 9),
             bg=self.bg_color,
             fg="#999"
@@ -258,7 +259,7 @@ class LegalAssistantApp:
         footer_frame = tk.Frame(self.root, bg=self.bg_color, height=80)
         footer_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        info_text = "📊 Thông tin: 212 điều luật | RAG + Gemini AI | Tiếng Việt"
+        info_text = "📊 Thông tin: 212 điều luật | RAG + Ollama (Mistral 7B) | Tiếng Việt"
         info_label = tk.Label(
             footer_frame,
             text=info_text,
@@ -275,7 +276,7 @@ class LegalAssistantApp:
                 self.status_label.config(text="🔄 Khởi tạo (20-30s)...", fg="#ffc107")
                 self.root.update()
                 
-                self.qa_chain = build_rag_chain(temperature=0.1, top_k=5)
+                self.qa_chain = build_rag_chain(temperature=0.1, top_k=10)
                 
                 self.status_label.config(text="✅ Sẵn sàng", fg="#60d66d")
             except Exception as e:
@@ -286,7 +287,7 @@ class LegalAssistantApp:
         thread.start()
     
     def search(self):
-        """Search/Query"""
+        """Search/Query với streaming và timing"""
         if self.is_loading:
             messagebox.showinfo("Chờ một chút", "Đang xử lý câu hỏi trước...")
             return
@@ -304,47 +305,67 @@ class LegalAssistantApp:
         # Add to history
         self.query_history.insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] {question[:50]}...")
         
+        # Reset streaming
+        self.current_answer_chunks = []
+        
+        # Streaming callback
+        def stream_callback(chunk):
+            """Nhận từng chunk và cập nhật UI"""
+            self.current_answer_chunks.append(chunk)
+            self.root.after(0, self._update_streaming_display)
+        
         # Search in background
         def _search():
             try:
                 self.is_loading = True
                 self.search_btn.config(state=tk.DISABLED)
-                self.status_label.config(text="⏳ Đang xử lý...", fg="#ffc107")
+                self.status_label.config(text="🔍 Đang tìm kiếm tài liệu...", fg="#ffc107")
                 self.root.update()
                 
                 temperature = self.temperature_var.get()
                 top_k = self.topk_var.get()
                 
-                # Rebuild chain with new settings
+                # Hiển thị đang xử lý
+                self.answer_output.config(state=tk.NORMAL)
+                self.answer_output.delete(1.0, tk.END)
+                self.answer_output.insert(1.0, "⏳ Đang tìm kiếm và tạo câu trả lời...")
+                self.answer_output.config(state=tk.DISABLED)
+                
+                # Rebuild chain
                 qa_chain = build_rag_chain(temperature=temperature, top_k=top_k)
                 
-                # Query
-                result = query_rag(qa_chain, question)
+                # Query với streaming
+                result = query_rag(qa_chain, question, stream_callback=stream_callback)
                 
-                # Display answer
+                # Lấy timing
+                timing = result.get("timing", {})
+                timing_text = f"\n\n⏱️ THỜI GIAN:\n   - Tìm kiếm: {timing.get('search_time', 0):.2f}s\n   - Tạo câu trả lời: {timing.get('llm_time', 0):.2f}s\n   - Tổng: {timing.get('total_time', 0):.2f}s"
+                
+                # Display final answer
                 answer_text = result.get('answer', 'Không có câu trả lời')
                 self.answer_output.config(state=tk.NORMAL)
                 self.answer_output.delete(1.0, tk.END)
-                self.answer_output.insert(1.0, answer_text)
+                self.answer_output.insert(1.0, answer_text + timing_text)
                 self.answer_output.config(state=tk.DISABLED)
                 
                 # Display sources
                 sources_text = ""
                 for i, doc in enumerate(result.get("sources", []), 1):
                     content = doc.page_content[:150].replace('\n', ' ')
-                    metadata_str = ""
-                    if doc.metadata:
-                        for key, value in doc.metadata.items():
-                            metadata_str += f" | {key}: {value}"
-                    
-                    sources_text += f"[{i}] {content}...\n{metadata_str}\n\n"
+                    citation = doc.metadata.get("citation", "N/A")
+                    sources_text += f"[{i}] {citation}\n{content}...\n\n"
                 
                 self.sources_output.config(state=tk.NORMAL)
                 self.sources_output.delete(1.0, tk.END)
                 self.sources_output.insert(1.0, sources_text)
                 self.sources_output.config(state=tk.DISABLED)
                 
-                self.status_label.config(text=f"✅ Tìm được {len(result.get('sources', []))} tài liệu", fg="#60d66d")
+                # Status với timing
+                total_time = timing.get('total_time', 0)
+                self.status_label.config(
+                    text=f"✅ Hoàn thành {total_time:.2f}s | {len(result.get('sources', []))} tài liệu",
+                    fg="#60d66d"
+                )
                 
             except Exception as e:
                 messagebox.showerror("Lỗi", f"Lỗi khi tìm kiếm:\n\n{str(e)}")
@@ -356,6 +377,15 @@ class LegalAssistantApp:
         
         thread = threading.Thread(target=_search, daemon=True)
         thread.start()
+    
+    def _update_streaming_display(self):
+        """Cập nhật UI khi có chunk mới"""
+        if self.current_answer_chunks:
+            current_text = "".join(self.current_answer_chunks)
+            self.answer_output.config(state=tk.NORMAL)
+            self.answer_output.delete(1.0, tk.END)
+            self.answer_output.insert(1.0, current_text + " ▌")
+            self.answer_output.config(state=tk.DISABLED)
     
     def clear(self):
         """Clear inputs and outputs"""
