@@ -18,28 +18,23 @@ from refusal_and_citations import REFUSAL_MESSAGES
 OLLAMA_MODEL = "llama3"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
-# Improved prompt - KHÔNG tóm tắt, trích dẫn đầy đủ
-VIETNAMESE_PROMPT = """Bạn là trợ lý luật pháp Việt Nam chuyên nghiệp.
+# Improved prompt - TRÍCH NGUYÊN VĂN, không tóm tắt
+VIETNAMESE_PROMPT = """NHIỆM VỤ: Tìm và trích nguyên văn nội dung liên quan từ TÀI LIỆU bên dưới để trả lời CÂU HỎI.
 
-QUY TẮC BẮT BUỘC (PHẢI TUÂN THỦ 100%):
-1. TRẢ LỜI HOÀN TOÀN BẰNG TIẾNG VIỆT
-2. KHÔNG ĐƯỢC TÓM TẮT - trích xuất ĐẦY ĐỦ nội dung từ tài liệu
-3. KHÔNG ĐƯỢC THÊM thông tin không có trong tài liệu
-4. Nếu tài liệu có nhiều mục (1., 2., 3., ...) → LIỆT KÊ ĐẦY ĐỦ TẤT CẢ
-5. Nếu hỏi về "các hành vi bị cấm" → ĐẾM số mục trong tài liệu → LIỆT KÊ ĐỦ
-6. Nếu thông tin KHÔNG CÓ trong context → TỪ CHỐI ngay
-
-ĐỊNH DẠNG TRẢ LỜI:
-- Trích xuất ĐẦY ĐỦ nội dung liên quan
-- Giữ nguyên số thứ tự như trong tài liệu gốc
-- Ghi rõ nguồn: [Điều X, Luật Y]
+QUY TẮC TUYỆT ĐỐI:
+- CHỈ dùng TIẾNG VIỆT
+- CHỈ lấy thông tin từ TÀI LIỆU được cung cấp, KHÔNG dùng kiến thức bên ngoài
+- TRÍCH NGUYÊN VĂN câu chữ trong tài liệu, KHÔNG diễn giải lại
+- Nếu tài liệu có định nghĩa → trích nguyên văn định nghĩa đó
+- Nếu có nhiều khoản (1., 2., 3., ...) → liệt kê ĐỦ TẤT CẢ
+- Nếu không tìm thấy trong tài liệu → chỉ nói: "Không tìm thấy thông tin này trong các văn bản được cung cấp."
 
 TÀI LIỆU:
 {context}
 
 CÂU HỎI: {query}
 
-TRẢ LỜI (TRÍCH XUẤT ĐẦY ĐỦ, KHÔNG TÓM TẮT):
+TRẢ LỜI (trích nguyên văn từ tài liệu, bằng tiếng Việt):
 """
 
 
@@ -82,6 +77,7 @@ def build_rag_chain(temperature=0.1, top_k=5, rebuild_llm=False):
         model=OLLAMA_MODEL,
         base_url=OLLAMA_BASE_URL,
         temperature=temperature,
+        system="Bạn là trợ lý pháp luật Việt Nam. Bạn PHẢI trả lời HOÀN TOÀN bằng TIẾNG VIỆT. TUYỆT ĐỐI KHÔNG được dùng tiếng Anh trong câu trả lời.",
     )
     
     # 3. Build custom chain

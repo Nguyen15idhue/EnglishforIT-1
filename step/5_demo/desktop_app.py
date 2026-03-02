@@ -31,6 +31,7 @@ class LegalAssistantApp:
         self.query_history = []
         self.is_loading = False
         self.current_answer_chunks = []
+        self.streaming_active = False
         
         # Colors
         self.bg_color = "#1e1e1e"
@@ -307,12 +308,14 @@ class LegalAssistantApp:
         
         # Reset streaming
         self.current_answer_chunks = []
+        self.streaming_active = True
         
         # Streaming callback
         def stream_callback(chunk):
             """Nhận từng chunk và cập nhật UI"""
-            self.current_answer_chunks.append(chunk)
-            self.root.after(0, self._update_streaming_display)
+            if self.streaming_active:
+                self.current_answer_chunks.append(chunk)
+                self.root.after(0, self._update_streaming_display)
         
         # Search in background
         def _search():
@@ -341,12 +344,26 @@ class LegalAssistantApp:
                 timing = result.get("timing", {})
                 timing_text = f"\n\n⏱️ THỜI GIAN:\n   - Tìm kiếm: {timing.get('search_time', 0):.2f}s\n   - Tạo câu trả lời: {timing.get('llm_time', 0):.2f}s\n   - Tổng: {timing.get('total_time', 0):.2f}s"
                 
+                # Dừng streaming trước khi hiển thị final
+                self.streaming_active = False
+                
                 # Display final answer
                 answer_text = result.get('answer', 'Không có câu trả lời')
-                self.answer_output.config(state=tk.NORMAL)
-                self.answer_output.delete(1.0, tk.END)
-                self.answer_output.insert(1.0, answer_text + timing_text)
-                self.answer_output.config(state=tk.DISABLED)
+                
+                # Gắn citations vào câu trả lời
+                citations = result.get("source_citations", [])
+                citation_text = ""
+                if citations and not result.get("refused"):
+                    citation_text = "\n\n📌 Căn cứ pháp lý:\n"
+                    for i, c in enumerate(citations, 1):
+                        citation_text += f"   {i}. {c}\n"
+                
+                def _update_final():
+                    self.answer_output.config(state=tk.NORMAL)
+                    self.answer_output.delete(1.0, tk.END)
+                    self.answer_output.insert(1.0, answer_text + citation_text + timing_text)
+                    self.answer_output.config(state=tk.DISABLED)
+                self.root.after(0, _update_final)
                 
                 # Display sources
                 sources_text = ""
@@ -380,7 +397,7 @@ class LegalAssistantApp:
     
     def _update_streaming_display(self):
         """Cập nhật UI khi có chunk mới"""
-        if self.current_answer_chunks:
+        if self.streaming_active and self.current_answer_chunks:
             current_text = "".join(self.current_answer_chunks)
             self.answer_output.config(state=tk.NORMAL)
             self.answer_output.delete(1.0, tk.END)
